@@ -7,6 +7,7 @@ from risk_management import check_risk
 from logger import log
 
 def main():
+    send_telegram_message("🚀 프로그램 실행됨")
     log(f"[모드: {settings.TRADE_MODE}] 자동매매 시작")
 
     if settings.TRADE_MODE == "simulation":
