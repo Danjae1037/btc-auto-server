@@ -13,12 +13,17 @@ class ControlRequest(BaseModel):
     mode: TradeMode = TradeMode.mock
     trading_on: bool = False
 
+# 현재 서버 상태를 저장하는 전역 변수
 state = {
     "mode": TradeMode.mock,
     "trading_on": False,
     "profit_rate": 0.0,
     "trade_count": 0
 }
+
+@app.get("/")
+def root():
+    return {"message": "✅ 자동매매 서버가 정상 작동 중입니다!"}
 
 @app.get("/status")
 def get_status():
@@ -35,4 +40,4 @@ def get_metrics():
     return {
         "profit_rate": state["profit_rate"],
         "trade_count": state["trade_count"]
-    }
+}
