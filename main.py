@@ -1,79 +1,62 @@
-from fastapi import FastAPI, BackgroundTasks from pydantic import BaseModel from enum import Enum import pandas as pd import json import os import datetime import csv import asyncio
+# main.py
+
+from fastapi import FastAPI, HTTPException
+from trade_engine import toggle_trading, get_asset_status, reset_start_of_day_asset
+from core.state import set_mode, get_current_mode
+from telegram_utils import send_control_status
+import threading
+import uvicorn
 
 app = FastAPI()
 
-class TradeMode(str, Enum): mock = "모의거래" testnet = "테스트넷" live = "실거래"
+# 모드 변경 API (mock, testnet, live)
+@app.post("/mode/{mode_name}")
+def change_mode(mode_name: str):
+    mode_name = mode_name.lower()
+    if mode_name not in ["mock", "testnet", "live"]:
+        raise HTTPException(status_code=400, detail="Invalid mode")
+    set_mode(mode_name)
+    send_control_status(mode_name, "모드 변경됨")
+    return {"message": f"Mode changed to {mode_name}"}
 
-class ControlRequest(BaseModel): mode: TradeMode = TradeMode.mock trading_on: bool = False
+# 거래 시작/중지 API
+@app.post("/trade/{action}")
+def trade_control(action: str):
+    if action not in ["on", "off"]:
+        raise HTTPException(status_code=400, detail="Invalid action")
+    toggle_trading(action == "on")
+    status = "ON" if action == "on" else "OFF"
+    mode = get_current_mode()
+    send_control_status(mode, status)
+    return {"message": f"Trading turned {status}"}
 
-class ConfigRequest(BaseModel): entry_threshold: float slippage: float fee: float
+# 현재 자산 상태 조회
+@app.get("/status")
+def status():
+    return get_asset_status()
 
-CONFIG_PATH = "config.json" LOG_PATH = "trade_log.csv" INITIAL_BALANCE = 10000.0
+# 매일 자정에 일일 시작 자산 초기화 (외부 스케줄러나 다른 방법으로 호출 필요)
+@app.post("/reset_start_asset")
+def reset_asset():
+    reset_start_of_day_asset()
+    return {"message": "Start of day asset reset"}
 
-초기 상태
+# 서버 시작 시 스케줄러 쓰레드 실행 (예: 일별 자산 초기화 등)
+def run_scheduler_forever():
+    import schedule
+    import time
 
-state = { "mode": TradeMode.mock, "trading_on": False, "profit_rate": 0.0, "trade_count": 0, "balance": INITIAL_BALANCE, "initial_balance": INITIAL_BALANCE }
+    # 매일 자정에 시작 자산 초기화
+    schedule.every().day.at("00:00").do(reset_start_of_day_asset)
 
-기본 설정값
+    while True:
+        schedule.run_pending()
+        time.sleep(30)
 
-config = { "entry_threshold": 0.16, "slippage": 0.05, "fee": 0.06 }
+@app.on_event("startup")
+def start_background_tasks():
+    thread = threading.Thread(target=run_scheduler_forever, daemon=True)
+    thread.start()
 
-if os.path.exists(CONFIG_PATH): with open(CONFIG_PATH, 'r') as f: config.update(json.load(f))
-
-@app.get("/") def root(): return {"message": "✅ 자동매매 서버가 정상 작동 중입니다!"}
-
-@app.get("/status") def get_status(): return state
-
-@app.get("/metrics") def get_metrics(): return { "profit_rate": state["profit_rate"], "trade_count": state["trade_count"], "balance": state["balance"] }
-
-@app.post("/control") def control(req: ControlRequest, background_tasks: BackgroundTasks): state["mode"] = req.mode state["trading_on"] = req.trading_on if req.trading_on: background_tasks.add_task(run_strategy) return {"message": "상태가 변경되었습니다.", "new_state": state}
-
-@app.get("/config") def get_config(): return config
-
-@app.post("/config") def set_config(new_config: ConfigRequest): config.update(new_config.dict()) with open(CONFIG_PATH, 'w') as f: json.dump(config, f) return {"message": "설정이 변경되었습니다.", "new_config": config}
-
-@app.get("/report/daily") def report_daily(): today = datetime.date.today().isoformat() rows = [] if os.path.exists(LOG_PATH): with open(LOG_PATH, newline='') as f: reader = csv.DictReader(f) rows = [r for r in reader if r['date'] == today] daily_profit = sum(float(r['profit']) for r in rows) return { "date": today, "trades": len(rows), "daily_profit": round(daily_profit, 4) }
-
-def run_strategy(): today = datetime.date.today().strftime("%Y-%m-%d") file_path = f"/mnt/data/BTCUSDT-1m-{today}.csv" if not os.path.exists(file_path): print(f"⚠️ 데이터 파일 없음: {file_path}") return df = pd.read_csv(file_path)
-
-trades = 0
-balance = state['balance']
-init_balance = balance
-
-with open(LOG_PATH, 'a', newline='') as f:
-    writer = csv.writer(f)
-    if f.tell() == 0:
-        writer.writerow(["date", "time", "entry_price", "exit_price", "profit", "balance"])
-
-    for i in range(len(df)):
-        row = df.iloc[i]
-        open_price = float(row['Open'])
-        high_price = float(row['High'])
-
-        entry_threshold = 1 + (config['entry_threshold'] / 100)
-        if high_price >= open_price * entry_threshold:
-            entry_price = open_price * (1 + (config['fee'] + config['slippage']) / 100)
-            exit_price = high_price * (1 - config['slippage'] / 100)
-            profit_ratio = (exit_price - entry_price) / entry_price
-            profit = balance * profit_ratio
-            balance += profit
-
-            writer.writerow([
-                today,
-                datetime.datetime.utcfromtimestamp(int(row['Timestamp'])/1000).strftime('%H:%M:%S'),
-                round(entry_price, 2),
-                round(exit_price, 2),
-                round(profit, 4),
-                round(balance, 2)
-            ])
-
-            trades += 1
-
-            if balance < init_balance * 0.5 or balance < state['balance'] * 0.7:
-                state['trading_on'] = False
-                break
-
-state['balance'] = balance
-state['trade_count'] += trades
-state['profit_rate'] = round((balance - state['initial_balance']) / state['initial_balance'] * 100, 2)
-
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
