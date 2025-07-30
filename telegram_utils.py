@@ -1,16 +1,12 @@
+import os
 import requests
-from config import settings
 
-def send_telegram_message(message):
-    if not settings.TELEGRAM_TOKEN or not settings.TELEGRAM_CHAT_ID:
-        return
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-    url = f"https://api.telegram.org/bot{settings.TELEGRAM_TOKEN}/sendMessage"
-    data = {
-        "chat_id": settings.TELEGRAM_CHAT_ID,
-        "text": message
-    }
-    try:
-        requests.post(url, data=data)
-    except:
-        pass
+def send_telegram_message(text: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    params = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+    response = requests.get(url, params=params)
+    if not response.ok:
+        print(f"Telegram 전송 실패: {response.text}")
